@@ -10,6 +10,7 @@ PBUILD_SOURCES="${SOURCES:-/opt/pbuild/sources}"
 PBUILD_REGISTRO="${REGISTRO:-/opt/pbuild/registro}"
 PBUILD_LOGDIR="$PBUILD_ROOT/logs"
 PBUILD_PKGDIR="$PBUILD_SOURCES/packages"
+PBUILD_HOOKS="$PBUILD_REPO/hooks"
 
 mkdir -p "$PBUILD_ROOT" "$PBUILD_SOURCES" "$PBUILD_REGISTRO" "$PBUILD_LOGDIR" "$PBUILD_PKGDIR"
 
@@ -22,10 +23,10 @@ reset="\033[0m"
 
 # === FUNÇÃO DE SPINNER ===
 spinner() {
-    pid=$!
+    pid="$1"
     spin='-\|/'
     i=0
-    while kill -0 $pid 2>/dev/null; do
+    while kill -0 "$pid" 2>/dev/null; do
         i=$(( (i+1) %4 ))
         printf "\r[%s] " "${spin:$i:1}"
         sleep 0.1
@@ -44,6 +45,7 @@ load_recipe() {
     [ ! -f "$recipe" ] && error "Receita $recipe não encontrada."
     . "$recipe"
     : "${pkgname:?}" "${pkgver:?}" "${pkgdir:?}" "${pkgurl:?}" || error "Receita inválida"
+    : "${build:?}" "${install:?}" || error "Receita deve definir 'build' e 'install'"
 }
 
 # === FUNÇÃO: DOWNLOAD ===
@@ -53,15 +55,17 @@ download() {
             url="${pkgurl#git+}"
             log "Clonando repositório $url"
             cd "$PBUILD_SOURCES" || exit 1
-            git clone "$url" "$pkgdir" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-download.log" &
-            spinner
+            [ -d "$pkgdir" ] || git clone "$url" "$pkgdir" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-download.log" &
+            pid=$!
+            spinner $pid
             ;;
         http*|ftp*)
             file=$(basename "$pkgurl")
             log "Baixando $pkgurl"
             cd "$PBUILD_SOURCES" || exit 1
             [ -f "$file" ] || curl -L "$pkgurl" -o "$file" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-download.log" &
-            spinner
+            pid=$!
+            spinner $pid
             ;;
         *)
             error "URL não reconhecida: $pkgurl"
@@ -72,6 +76,12 @@ download() {
 # === FUNÇÃO: EXTRAIR ===
 extract() {
     cd "$PBUILD_ROOT" || exit 1
+    if [ -d "$PBUILD_SOURCES/$pkgdir/.git" ]; then
+        log "Copiando repositório git $pkgdir"
+        cp -r "$PBUILD_SOURCES/$pkgdir" .
+        return
+    fi
+
     src="$PBUILD_SOURCES/$(basename "$pkgurl")"
     log "Extraindo $src"
     case "$src" in
@@ -80,11 +90,7 @@ extract() {
         *.tar.bz2)        tar -xf "$src" ;;
         *.zip)            unzip -q "$src" ;;
         *)
-            if [ -d "$PBUILD_SOURCES/$pkgdir/.git" ]; then
-                cp -r "$PBUILD_SOURCES/$pkgdir" .
-            else
-                error "Formato não suportado: $src"
-            fi
+            error "Formato não suportado: $src"
             ;;
     esac
 }
@@ -96,16 +102,18 @@ apply_patches() {
     for p in $patches; do
         log "Aplicando patch $p"
         patch -p1 < "$PBUILD_REPO/patches/$p" 2>&1 | tee -a "$PBUILD_LOGDIR/$pkgname-patch.log" &
-        spinner
+        pid=$!
+        spinner $pid
     done
 }
 
 # === FUNÇÃO: BUILD ===
-build() {
+build_pkg() {
     cd "$PBUILD_ROOT/$pkgdir" || error "Diretório $pkgdir não encontrado"
     log "Compilando $pkgname"
     sh -c "$build" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-build.log" &
-    spinner
+    pid=$!
+    spinner $pid
 }
 
 # === FUNÇÃO: CHECK ===
@@ -114,7 +122,8 @@ check() {
     cd "$PBUILD_ROOT/$pkgdir" || exit 1
     log "Testando $pkgname"
     sh -c "$check" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-check.log" &
-    spinner
+    pid=$!
+    spinner $pid
 }
 
 # === FUNÇÃO: INSTALL ===
@@ -124,8 +133,9 @@ install_pkg() {
     rm -rf "$DESTDIR"
     mkdir -p "$DESTDIR"
     log "Instalando em DESTDIR"
-    sh -c "$install DESTDIR=$DESTDIR" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-install.log" &
-    spinner
+    DESTDIR="$DESTDIR" sh -c "$install" 2>&1 | tee "$PBUILD_LOGDIR/$pkgname-install.log" &
+    pid=$!
+    spinner $pid
 
     # Empacotamento
     pkgfile="$PBUILD_PKGDIR/${pkgname}-${pkgver}.tar.xz"
@@ -137,7 +147,7 @@ install_pkg() {
     fakeroot sh -c "tar -C / -xf $pkgfile" || error "Falha ao instalar $pkgname"
 
     # Registrar arquivos
-    tar -tf "$pkgfile" > "$PBUILD_REGISTRO/${pkgname}.files"
+    tar -tf "$pkgfile" | sed 's|^/||' > "$PBUILD_REGISTRO/${pkgname}.files"
     echo "$pkgname $pkgver" > "$PBUILD_REGISTRO/${pkgname}.info"
 
     log "$pkgname $pkgver instalado com sucesso"
@@ -154,6 +164,15 @@ remove_pkg() {
     done < "$filelist"
     rm -f "$filelist" "$PBUILD_REGISTRO/${pkg}.info"
     log "$pkg removido com sucesso"
+
+    # Executar hooks pós-remove, se existirem
+    if [ -d "$PBUILD_HOOKS/post-remove.d" ]; then
+        for hook in "$PBUILD_HOOKS/post-remove.d/"*; do
+            [ -x "$hook" ] || continue
+            log "Executando hook pós-remove: $hook"
+            "$hook" "$pkg"
+        done
+    fi
 }
 
 # === FUNÇÃO: INFO ===
@@ -176,9 +195,19 @@ case "$1" in
         download
         extract
         apply_patches
-        build
+        build_pkg
         check
         install_pkg
+        ;;
+    build)
+        recipe="$2"
+        load_recipe "$recipe"
+        download
+        extract
+        apply_patches
+        build_pkg
+        check
+        log "Build concluído para $pkgname (não instalado)."
         ;;
     remove)
         remove_pkg "$2"
@@ -190,6 +219,6 @@ case "$1" in
         search_pkg "$2"
         ;;
     *)
-        echo "Uso: pbuild {install <receita>|remove <pkg>|info <pkg>|search <termo>}"
+        echo "Uso: pbuild {install <receita>|build <receita>|remove <pkg>|info <pkg>|search <termo>}"
         ;;
 esac
