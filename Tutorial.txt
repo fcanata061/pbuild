@@ -1,0 +1,257 @@
+#############################################
+#        MANUAL COMPLETO DO PBUILD          #
+#     Gerenciador de Pacotes para LFS       #
+#############################################
+
+pbuild é um gerenciador de pacotes em shell POSIX criado para
+automatizar a construção, instalação, empacotamento e remoção
+de programas em sistemas Linux From Scratch.
+
+Este tutorial explica como instalar, configurar e usar o pbuild,
+incluindo exemplos de receitas e a construção de um toolchain
+(binutils, gcc, glibc).
+
+
+=================================================
+1. ESTRUTURA DE DIRETÓRIOS
+=================================================
+
+Por padrão, o pbuild usa os seguintes caminhos:
+
+/tmp/pbuild/         → diretório temporário de build
+$SOURCES/            → fontes baixadas (.tar.gz, .tar.xz, git, etc.)
+$REGISTRO/           → logs, metadados e lista de arquivos dos pacotes
+$REPO/               → repositório de receitas pbuild
+
+Dentro do $REPO, as receitas são organizadas em categorias:
+$REPO/base
+$REPO/x11
+$REPO/extras
+$REPO/desktop
+
+
+=================================================
+2. INSTALAÇÃO DO PBUILD
+=================================================
+
+1. Copie o script principal para o sistema:
+   sudo cp pbuild /usr/local/bin/
+   sudo chmod +x /usr/local/bin/pbuild
+
+2. Crie as pastas necessárias:
+   sudo mkdir -pv /var/pbuild/{sources,registro,repo}
+   sudo chmod -R 777 /var/pbuild
+
+3. Configure variáveis globais em /etc/pbuild.conf:
+
+   SOURCES=/var/pbuild/sources
+   REGISTRO=/var/pbuild/registro
+   REPO=/var/pbuild/repo
+   BUILDDIR=/tmp/pbuild
+   MAKEFLAGS="-j$(nproc)"
+
+4. Exporte as variáveis no shell:
+   source /etc/pbuild.conf
+
+
+=================================================
+3. FORMATO DE RECEITA (arquivo .pbuild)
+=================================================
+
+Uma receita define como baixar, preparar, compilar e instalar um pacote.
+
+Exemplo genérico:
+
+pkgname=[man-db]
+pkgver=[2.12.0]
+pkgdir=[man-db-2.12.0]
+pkgurl=[https://ftp.gnu.org/gnu/man-db/man-db-2.12.0.tar.xz]
+md5sum=[abcdef1234567890]
+
+prepare=[
+    ./configure --prefix=/usr --sysconfdir=/etc
+]
+
+build=[
+    make
+]
+
+check=[
+    make check
+]
+
+install=[
+    make DESTDIR=$PKGDIR install
+]
+
+postinstall=[
+    /usr/sbin/ldconfig
+]
+
+
+=================================================
+4. COMANDOS DO PBUILD
+=================================================
+
+pbuild build <receita>       → baixa, compila e gera pacote
+pbuild install <pacote>      → instala pacote binário
+pbuild remove <pacote>       → remove arquivos do pacote
+pbuild search <nome>         → procura receita no $REPO
+pbuild info <pacote>         → mostra informações do pacote
+pbuild rebuild <pacote>      → recompila pacote já instalado
+pbuild list                  → lista pacotes instalados
+
+
+=================================================
+5. EXEMPLOS DE TOOLCHAIN
+=================================================
+
+### BINUTILS (primeiro passo)
+
+Arquivo: $REPO/base/binutils-pass1.pbuild
+
+pkgname=[binutils-pass1]
+pkgver=[2.39]
+pkgdir=[binutils-2.39]
+pkgurl=[https://ftp.gnu.org/gnu/binutils/binutils-2.39.tar.xz]
+
+prepare=[
+    mkdir -v build
+    cd build
+]
+
+build=[
+    ../configure \
+        --prefix=$LFS/tools \
+        --with-sysroot=$LFS \
+        --target=$LFS_TGT \
+        --disable-nls \
+        --disable-werror
+    make
+]
+
+install=[
+    make DESTDIR=$PKGDIR install
+]
+
+
+### GCC PASS1
+
+Arquivo: $REPO/base/gcc-pass1.pbuild
+
+pkgname=[gcc-pass1]
+pkgver=[12.2.0]
+pkgdir=[gcc-12.2.0]
+pkgurl=[https://ftp.gnu.org/gnu/gcc/gcc-12.2.0/gcc-12.2.0.tar.xz]
+
+prepare=[
+    tar -xf ../mpfr*.tar.xz
+    mv -v mpfr* mpfr
+    tar -xf ../gmp*.tar.xz
+    mv -v gmp* gmp
+    tar -xf ../mpc*.tar.gz
+    mv -v mpc* mpc
+    mkdir -v build
+    cd build
+]
+
+build=[
+    ../configure \
+        --target=$LFS_TGT \
+        --prefix=$LFS/tools \
+        --with-glibc-version=2.36 \
+        --with-sysroot=$LFS \
+        --with-newlib \
+        --without-headers \
+        --enable-initfini-array \
+        --disable-nls \
+        --disable-shared \
+        --disable-multilib \
+        --disable-decimal-float \
+        --disable-threads \
+        --disable-libatomic \
+        --disable-libgomp \
+        --disable-libquadmath \
+        --disable-libssp \
+        --disable-libvtv \
+        --disable-libstdcxx \
+        --enable-languages=c,c++
+    make
+]
+
+install=[
+    make DESTDIR=$PKGDIR install
+]
+
+
+### GLIBC
+
+Arquivo: $REPO/base/glibc.pbuild
+
+pkgname=[glibc]
+pkgver=[2.36]
+pkgdir=[glibc-2.36]
+pkgurl=[https://ftp.gnu.org/gnu/glibc/glibc-2.36.tar.xz]
+
+prepare=[
+    mkdir -v build
+    cd build
+]
+
+build=[
+    ../configure --prefix=/usr \
+        --disable-werror \
+        --enable-kernel=3.2 \
+        --with-headers=/usr/include \
+        libc_cv_slibdir=/usr/lib
+    make
+]
+
+check=[
+    make check
+]
+
+install=[
+    make DESTDIR=$PKGDIR install
+]
+
+postinstall=[
+    /usr/sbin/ldconfig
+]
+
+
+=================================================
+6. REMOVER PACOTES
+=================================================
+
+Para remover um pacote:
+pbuild remove <nome>
+
+O comando usa a lista $REGISTRO/<pacote>.files para apagar cada
+arquivo instalado. Depois executa hooks pós-remove.
+
+
+=================================================
+7. RECOMPILAR PACOTES
+=================================================
+
+Para recompilar:
+pbuild rebuild <pacote>
+
+
+=================================================
+8. CONCLUSÃO
+=================================================
+
+O pbuild oferece:
+- Receitas simples em shell POSIX
+- Download automático de fontes
+- Compilação e instalação em DESTDIR com fakeroot
+- Registro de arquivos por pacote
+- Remoção limpa
+- Empacotamento em tarballs
+- Organização modular em categorias (base, x11, desktop...)
+
+Com ele é possível gerenciar o sistema LFS de forma organizada,
+recompilar pacotes, e manter um repositório completo de binários
+e receitas.
