@@ -1,0 +1,490 @@
+#######################################################################
+#                   GUIA ÚNICO (TXT) – PBUILD + LFS                   #
+#   Construindo um Linux From Scratch usando o gerenciador pbuild     #
+#   Formato: texto puro (salve como pbuild-lfs-guia.txt)              #
+#######################################################################
+
+Este guia mostra como instalar, configurar e usar o pbuild (gerenciador POSIX)
+para automatizar a construção de um Linux From Scratch (LFS). Inclui:
+- Instalação e configuração do pbuild
+- Estrutura de diretórios e variáveis
+- Comandos do pbuild
+- Receitas exemplo (toolchain e base)
+- Ordem de compilação e passos de chroot
+- Dicas de manutenção (rebuild, remove, revdep)
+
+=======================================================================
+1) PRÉ-REQUISITOS E AVISOS
+=======================================================================
+- Host Linux funcional com ferramentas básicas (sh, coreutils, curl, git, tar,
+  xz, gzip, bzip2, unzip, patch, file, find, fakeroot, ldconfig).
+- Privilégios para montar partições e usar chroot.
+- Espaço em disco recomendado: 20–40 GB livres.
+- Leia o livro LFS correspondente ao seu alvo; adapte versões/flags conforme ele.
+
+=======================================================================
+2) ESTRUTURA DE DIRETÓRIOS RECOMENDADA
+=======================================================================
+Usaremos /mnt/lfs como raiz do LFS:
+
+  export LFS=/mnt/lfs
+  sudo mkdir -pv $LFS
+  sudo mount <SUA_PARTIÇÃO> $LFS         # ex.: sudo mount /dev/sdXY /mnt/lfs
+
+Árvores do pbuild dentro do LFS:
+
+  $LFS/sources     → arquivos baixados de fontes (SOURCES)
+  $LFS/registro    → metadados e listas de arquivos (REGISTRO)
+  $LFS/repo        → repositório de receitas .pbuild (REPO)
+  $LFS/tools       → toolchain temporário (binutils/gcc pass1/2 etc.)
+  /tmp/pbuild      → diretório temporário de build
+
+Crie e dê permissões:
+
+  sudo mkdir -pv $LFS/{sources,registro,repo,tools}
+  sudo chmod a+wt $LFS/sources
+  sudo mkdir -pv /tmp/pbuild
+
+=======================================================================
+3) INSTALAÇÃO DO PBUILD (SCRIPT)
+=======================================================================
+Copie o script "pbuild" (arquivo executável POSIX sh) para o PATH do host:
+
+  sudo cp pbuild /usr/local/bin/pbuild
+  sudo chmod +x /usr/local/bin/pbuild
+
+Observação: o pbuild aceita variáveis via ambiente e/ou opções CLI. Ele:
+- Faz download (curl/git)
+- Extrai (tar.* / zip / gz/xz/bz2)
+- Aplica patches (opcional)
+- Compila (build), testa (check), instala em DESTDIR via fakeroot
+- Gera pacote .tar.{xz,gz,bz2} e permite instalar binário a partir dele
+- Mantém registro de arquivos e metadados
+- Suporta remove, rebuild, revdep, strip opcional, hooks pós-remove
+
+=======================================================================
+4) ARQUIVO DE CONFIGURAÇÃO (OPCIONAL)
+=======================================================================
+Opcionalmente, crie /etc/pbuild.conf ou ~/.pbuildrc com:
+
+  SOURCES=$LFS/sources
+  REGISTRO=$LFS/registro
+  REPO=$LFS/repo
+  TMPROOT=/tmp/pbuild
+  PKGOUT=$LFS/sources/pkg
+  HOOKS=/etc/pbuild/hooks
+  JOBS=auto                 # ou um número, ex.: 8
+  STRIP=yes                 # yes/no
+  PKGCOMP=xz                # xz/gz/bz2
+  COLOR=auto                # auto/always/never
+
+Exporte no shell atual:
+  [ -f /etc/pbuild.conf ] && . /etc/pbuild.conf
+  [ -f ~/.pbuildrc ] && . ~/.pbuildrc
+
+=======================================================================
+5) FORMATO DE RECEITA (.pbuild)
+=======================================================================
+Receitas são arquivos texto com campos tipo chave=[valor] e blocos de shell:
+  pkgname=[nome]
+  pkgver=[versão]
+  pkgdir=[diretório-fonte-apos-extrair]      # opcional, pbuild tenta deduzir
+  pkgurl=[URL_tarball_ou_repo_git]
+  md5sum=[hash]                               # opcional
+  patches=[a.patch b.patch]                   # opcional, relativos a $SOURCES
+  vcs=[git]                                   # opcional (usa git clone)
+  vcs_branch=[main]                           # opcional
+  destsubdir=[build]                          # opcional (subdir de build)
+  makeflags=[-j8]                             # opcional
+  prepare=[comandos...]
+  build=[comandos...]
+  check=[comandos...]
+  install=[comandos...]                       # use DESTDIR='$PKGDIR' no install
+  postinstall=[comandos...]                   # roda após instalação real
+
+Observações:
+- $PKGDIR é um DESTDIR temporário que o pbuild define ao instalar.
+- Para compilar fora da árvore, use prepare para criar "build" e cd build.
+- Em toolchain use prefixos e variáveis do LFS (como $LFS/tools) conforme a fase.
+
+=======================================================================
+6) COMANDOS DO PBUILD (RESUMO)
+=======================================================================
+  pbuild search <termo>                 → procura receitas no $REPO
+  pbuild build  <caminho/receita.pbuild>→ baixa, extrai, compila, testa, empacota e instala
+  pbuild install <pacote.tar.xz>        → instala pacote binário no sistema
+  pbuild info   <pkgname>               → mostra metadados do pacote instalado
+  pbuild remove <pkgname>               → remove arquivos registrados e roda hooks
+  pbuild revdep [--fix]                 → checa libs "not found" e tenta corrigir
+  Opções úteis: --repo DIR --sources DIR --registro DIR --tmp DIR --jobs N|auto --strip yes|no
+
+=======================================================================
+7) ORDEM RECOMENDADA PARA TOOLCHAIN LFS (ESBOÇO)
+=======================================================================
+Fase Toolchain (fora do chroot, usando usuário "lfs" normalmente):
+  1) binutils-pass1
+  2) gcc-pass1 (+ gmp/mpfr/mpc vendor-in-tree)
+  3) linux-headers
+  4) glibc
+  5) libstdc++ (a partir do gcc-pass2)
+  6) binutils-pass2
+  7) gcc-pass2
+
+Depois, preparar chroot e construir o sistema base (em /usr).
+
+=======================================================================
+8) RECEITAS EXEMPLO – TOOLCHAIN
+=======================================================================
+Salve estes arquivos em:
+  $REPO/base/<nome>.pbuild
+Ajuste versões/URLs conforme o LFS que você segue.
+
+8.1) BINUTILS PASS 1 – $REPO/base/binutils-pass1.pbuild
+-----------------------------------------------------------------------
+pkgname=[binutils-pass1]
+pkgver=[2.41]
+pkgurl=[https://ftp.gnu.org/gnu/binutils/binutils-2.41.tar.xz]
+pkgdir=[binutils-2.41]
+
+prepare=[
+mkdir -v build
+cd build
+]
+
+build=[
+../configure \
+  --prefix=$LFS/tools \
+  --with-sysroot=$LFS \
+  --target=$(uname -m)-lfs-linux-gnu \
+  --disable-nls \
+  --disable-werror
+make
+]
+
+# testes podem ser longos e nem sempre necessários no pass1
+# check=[make -k check]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+8.2) GCC PASS 1 – $REPO/base/gcc-pass1.pbuild
+-----------------------------------------------------------------------
+pkgname=[gcc-pass1]
+pkgver=[13.2.0]
+pkgurl=[https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz]
+pkgdir=[gcc-13.2.0]
+
+prepare=[
+# Assumindo que gmp, mpfr, mpc já estão em $SOURCES (versões compatíveis)
+tar -xf $SOURCES/mpfr-*.tar.* && mv -v mpfr-* mpfr
+tar -xf $SOURCES/gmp-*.tar.*  && mv -v gmp-*  gmp
+tar -xf $SOURCES/mpc-*.tar.*  && mv -v mpc-*  mpc
+mkdir -v build
+cd build
+]
+
+build=[
+../configure \
+  --target=$(uname -m)-lfs-linux-gnu \
+  --prefix=$LFS/tools \
+  --with-glibc-version=2.38 \
+  --with-sysroot=$LFS \
+  --with-newlib \
+  --without-headers \
+  --enable-initfini-array \
+  --disable-nls \
+  --disable-shared \
+  --disable-multilib \
+  --disable-decimal-float \
+  --disable-threads \
+  --disable-libatomic \
+  --disable-libgomp \
+  --disable-libquadmath \
+  --disable-libssp \
+  --disable-libvtv \
+  --disable-libstdcxx \
+  --enable-languages=c,c++
+make
+]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+8.3) LINUX HEADERS – $REPO/base/linux-headers.pbuild
+-----------------------------------------------------------------------
+pkgname=[linux-headers]
+pkgver=[6.9]
+pkgurl=[https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.9.tar.xz]
+pkgdir=[linux-6.9]
+
+build=[
+make mrproper
+make headers
+find usr/include -name '.*' -delete
+]
+
+install=[
+mkdir -pv $PKGDIR/usr
+cp -rv usr/include $PKGDIR/usr/
+]
+
+8.4) GLIBC – $REPO/base/glibc.pbuild
+-----------------------------------------------------------------------
+pkgname=[glibc]
+pkgver=[2.38]
+pkgurl=[https://ftp.gnu.org/gnu/glibc/glibc-2.38.tar.xz]
+pkgdir=[glibc-2.38]
+
+prepare=[
+mkdir -v build
+cd build
+]
+
+build=[
+../configure --prefix=/usr \
+  --disable-werror \
+  --enable-kernel=3.2 \
+  --with-headers=/usr/include \
+  libc_cv_slibdir=/usr/lib
+make
+]
+
+check=[
+# Opcional; exige ambiente configurado. Pode ser demorado.
+make -k check
+]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+postinstall=[
+/usr/sbin/ldconfig
+]
+
+8.5) BINUTILS PASS 2 – $REPO/base/binutils-pass2.pbuild
+-----------------------------------------------------------------------
+pkgname=[binutils-pass2]
+pkgver=[2.41]
+pkgurl=[https://ftp.gnu.org/gnu/binutils/binutils-2.41.tar.xz]
+pkgdir=[binutils-2.41]
+
+prepare=[
+mkdir -v build
+cd build
+]
+
+build=[
+../configure \
+  --prefix=/usr \
+  --build=$(../config.guess) \
+  --host=$(uname -m)-lfs-linux-gnu \
+  --disable-nls \
+  --enable-shared \
+  --disable-werror
+make
+]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+8.6) GCC PASS 2 – $REPO/base/gcc-pass2.pbuild
+-----------------------------------------------------------------------
+pkgname=[gcc-pass2]
+pkgver=[13.2.0]
+pkgurl=[https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz]
+pkgdir=[gcc-13.2.0]
+
+prepare=[
+tar -xf $SOURCES/mpfr-*.tar.* && mv -v mpfr-* mpfr
+tar -xf $SOURCES/gmp-*.tar.*  && mv -v gmp-*  gmp
+tar -xf $SOURCES/mpc-*.tar.*  && mv -v mpc-*  mpc
+mkdir -v build
+cd build
+]
+
+build=[
+../configure \
+  --build=$(../config.guess) \
+  --host=$(uname -m)-lfs-linux-gnu \
+  --target=$(uname -m)-lfs-linux-gnu \
+  --prefix=/usr \
+  --disable-nls \
+  --enable-languages=c,c++ \
+  --disable-multilib \
+  --with-system-zlib
+make
+]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+8.7) LIBSTDC++ (a partir do GCC fonte) – $REPO/base/libstdcxx.pbuild
+-----------------------------------------------------------------------
+pkgname=[libstdcxx]
+pkgver=[13.2.0]
+pkgurl=[https://ftp.gnu.org/gnu/gcc/gcc-13.2.0/gcc-13.2.0.tar.xz]
+pkgdir=[gcc-13.2.0]
+
+prepare=[
+mkdir -v build
+cd build
+]
+
+build=[
+../libstdc++-v3/configure \
+  --host=$(uname -m)-lfs-linux-gnu \
+  --build=$(../config.guess) \
+  --prefix=/usr \
+  --disable-multilib \
+  --disable-nls \
+  --disable-libstdcxx-pch
+make
+]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+=======================================================================
+9) ENTRANDO EM CHROOT E CONTINUANDO O SISTEMA BASE
+=======================================================================
+Monte pseudo-sistemas e chroot:
+
+  sudo mount -v --bind /dev  $LFS/dev
+  sudo mount -vt devpts devpts $LFS/dev/pts
+  sudo mount -vt proc   proc   $LFS/proc
+  sudo mount -vt sysfs  sysfs  $LFS/sys
+  sudo mount -vt tmpfs  tmpfs  $LFS/run
+
+Entre no chroot:
+  sudo chroot $LFS /usr/bin/env -i HOME=/root TERM="$TERM" PS1='(lfs) \u:\w\$ ' \
+    PATH=/usr/bin:/usr/sbin:/bin:/sbin:/tools/bin \
+    /bin/sh -c "source /etc/pbuild.conf 2>/dev/null || true; /bin/bash --login"
+
+Dentro do chroot, ajuste PATH e variáveis do pbuild (se necessário) e siga com
+os pacotes base (zlib, file, bash, coreutils, grep, sed, tar, xz, gzip, bzip2,
+util-linux, e2fsprogs, shadow, inetutils, iproute2, man-db etc.) usando receitas
+no $REPO/base.
+
+Exemplos rápidos de receitas base:
+
+9.1) ZLIB – $REPO/base/zlib.pbuild
+-----------------------------------------------------------------------
+pkgname=[zlib]
+pkgver=[1.3.1]
+pkgurl=[https://zlib.net/zlib-1.3.1.tar.xz]
+pkgdir=[zlib-1.3.1]
+
+build=[
+./configure --prefix=/usr
+make
+]
+
+check=[make check]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+9.2) FILE – $REPO/base/file.pbuild
+-----------------------------------------------------------------------
+pkgname=[file]
+pkgver=[5.45]
+pkgurl=[https://astron.com/pub/file/file-5.45.tar.gz]
+pkgdir=[file-5.45]
+
+build=[
+./configure --prefix=/usr
+make
+]
+
+check=[make check]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+9.3) BASH – $REPO/base/bash.pbuild
+-----------------------------------------------------------------------
+pkgname=[bash]
+pkgver=[5.2.26]
+pkgurl=[https://ftp.gnu.org/gnu/bash/bash-5.2.26.tar.gz]
+pkgdir=[bash-5.2.26]
+
+build=[
+./configure --prefix=/usr --without-bash-malloc --with-installed-readline
+make
+]
+
+check=[make tests]
+
+install=[
+make DESTDIR=$PKGDIR install
+]
+
+=======================================================================
+10) USO PRÁTICO DO PBUILD (EXEMPLOS)
+=======================================================================
+Procurar receita:
+  pbuild search binutils
+
+Construir um pacote a partir da receita:
+  pbuild build $REPO/base/binutils-pass1.pbuild
+
+Instalar um pacote binário (tarball gerado):
+  pbuild install $LFS/sources/pkg/binutils-pass1-2.41.tar.xz
+
+Ver informações:
+  pbuild info binutils-pass1
+
+Remover pacote:
+  pbuild remove binutils-pass1
+
+Recompilar pacote:
+  pbuild build $REPO/base/binutils-pass1.pbuild --rebuild
+
+Checar dependências quebradas e tentar corrigir:
+  pbuild revdep --fix
+
+=======================================================================
+11) DICAS E BOAS PRÁTICAS
+=======================================================================
+- Sincronize versões do GCC/GLIBC/binutils conforme o LFS alvo.
+- Em pass1/2 do toolchain, evite rodar suítes de testes longas.
+- Use destsubdir=[build] em receitas de cmake/meson ou para builds fora da árvore.
+- Armazene patches em $SOURCES e liste-os no campo patches=[...].
+- Keep it simple: uma receita = um pacote. Use comentários para anotar opções.
+- Use JOBS=auto (ou um valor fixo) para acelerar compilações.
+- Use STRIP=yes para reduzir tamanho de binários no DESTDIR antes do empacote.
+- Mantenha $REGISTRO seguro: é sua base para remove/rebuild/diagnósticos.
+- Hooks pós-remove podem atualizar caches (ldconfig, icon-cache, gtk-update-icon-cache etc.).
+
+=======================================================================
+12) RESOLUÇÃO DE PROBLEMAS
+=======================================================================
+- Falha de verificação MD5: apague o tarball em $SOURCES e recompile.
+- "not found" em ldd: rode pbuild revdep; se listar libs, use --fix para tentar
+  reconstruir os pacotes que as fornecem.
+- Permissões: use fakeroot no install (o pbuild já faz) e rode pbuild com
+  privilégios adequados quando instalar no sistema real.
+- Ambiente LFS: confirme que $LFS está montado e que você está no contexto
+  correto (fora ou dentro do chroot) conforme a fase do livro.
+
+=======================================================================
+13) CONCLUSÃO
+=======================================================================
+Com o pbuild e receitas bem definidas, você automatiza a maior parte do LFS:
+- Download, extração, patch, build, testes, instalação (DESTDIR)
+- Empacotamento e instalação binária
+- Registro preciso de arquivos para remoção/rebuild
+- Verificação simples de dependências quebradas
+
+Ajuste as receitas às versões do seu LFS e siga a ordem recomendada do livro.
+Boa construção!
+
+# FIM DO GUIA
